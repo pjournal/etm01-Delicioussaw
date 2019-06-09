@@ -5,6 +5,7 @@
 #' @param outcomes vector of 3, binary outcomes, should be provided with the same order as probs
 #' @export
 #' @examples
+#' used in project
 RPS_single<- function(probs,outcomes){
   probs = cumsum(probs)
   outcomes = cumsum(outcomes)
