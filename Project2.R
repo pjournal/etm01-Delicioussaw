@@ -1,0 +1,148 @@
+require(data.table)
+require(lubridate)
+library(randomForest)
+install.packages("tree")
+library(tree)
+install.packages("MASS")
+require(MASS)
+#read data for matches and odds
+setwd("C:/Users/Mustafa Oguz Turkkan/Documents/GitHub/etm01-Delicioussaw")
+matches=readRDS('df9b1196-e3cf-4cc7-9159-f236fe738215_matches.rds')
+odds=readRDS('df9b1196-e3cf-4cc7-9159-f236fe738215_odd_details.rds')
+
+source('performance_metrics.r')
+
+#### adjust match data ####
+#split home and away scores
+matches[,c('score_home','score_away'):=tstrsplit(score,':')]
+matches[,score_home:=as.numeric(score_home)]
+matches[,score_away:=as.numeric(score_away)]
+
+#Define a new column called result for holding match result
+matches$result="None"
+matches[score_home>score_away,result:="Home"]
+matches[score_home==score_away,result:="Tie"]
+matches[score_home<score_away,result:="Away"]
+
+#delete unnecessary columns
+matches[,c('leagueId','type','score')]=list(NULL)
+
+#normalize time
+matches[,timestamp:=as_datetime(date,tz='Turkey')]
+matches[,c('date')]=list(NULL)
+
+#### adjusting odd data ####
+#get only 1x2 betTypes, hta=Home, Tie, Away
+hta_odds=odds[betType == "1x2"]
+
+#get rid of unnecessary totalhandicap column
+hta_odds[,c("totalhandicap")]=list(NULL)
+
+#normalize time for odds data
+hta_odds[,timestamp:=as_datetime(date,tz='Turkey')]
+hta_odds[,c('date')]=list(NULL)
+
+#Order all the odds
+hta_odds=hta_odds[order(matchId,oddtype,timestamp)]
+
+#Get the latest odds
+latest_hta_odds=hta_odds[,list(last_odd=odd[.N]),list(matchId,oddtype,bookmaker)]
+
+#write odds data as wide based on oddtype
+latest_hta_odds=dcast(latest_hta_odds,matchId+bookmaker~oddtype,value.var='last_odd')
+
+#change the odd data to probabilities
+latest_hta_odds$result=rowSums(cbind(latest_hta_odds$odd1,latest_hta_odds$odd2,latest_hta_odds$oddX))
+latest_hta_odds$odd1_prob=latest_hta_odds$odd1/latest_hta_odds$result
+latest_hta_odds$odd2_prob=latest_hta_odds$odd2/latest_hta_odds$result
+latest_hta_odds$oddX_prob=latest_hta_odds$oddX/latest_hta_odds$result
+pivot_hta_odds=latest_hta_odds[,list(odd1_prob=mean(odd1_prob),odd2_prob=mean(odd2_prob),oddX_prob=mean(oddX_prob)),by=list(matchId)]
+
+#merge odd probabilities with matches data
+matches_wth_odd=merge(matches,pivot_hta_odds,by=c('matchId'),all.x=TRUE)
+
+#take the last season's matches out as the test data
+test=matches_wth_odd[matches_wth_odd$timestamp>=as.Date("2018-06-30")]
+test[,c('timestamp','matchId')]=list(NULL)
+
+#exclude last season from all matches to obtain training data
+training=matches_wth_odd[matches_wth_odd$timestamp<as.Date("2018-06-30")]
+training[,c('timestamp','matchId')]=list(NULL)
+
+#### Random Forest prediction by using odd data ####
+training$result=as.factor(training$result)
+ranFor=randomForest(result~.,data=training[,c('result','odd1_prob','odd2_prob','oddX_prob')], na.action=na.roughfix)
+pred=predict(ranFor,newdata=test)
+table(test$result,pred)
+pred_prob=predict(ranFor,newdata = test, type='prob')
+
+#### adjusting data for rps calculation ####
+#outcomes matrix as Away, Home and Tie represented by 1s
+outcomes=matrix(0,nrow=nrow(pred_prob),ncol=3)
+for(e in 1:nrow(pred_prob)){
+    if(test$result[e]=='Away'){
+      outcomes[e,1]=1
+    }else if(test$result[e]=='Home'){
+      outcomes[e,2]=1
+    }else{
+      outcomes[e,3]=1
+    }
+}
+
+# RPS for random forest prediction 
+rps=RPS_matrix(pred_prob,outcomes)
+#### Random Forest RPS ####
+100*mean(rps)
+####
+
+plot(ranFor, type="l", main='Random Forest Prediction Result')
+
+#### prediction by using ordinal regression ####
+#create the same training and test datas for ordinal regression model
+tr_ordinal <- training
+test_ordinal <- test
+
+#change probability values into factor levels
+#5 factor levels as v.low,low,medium,high,v.high
+#levels will be assigned to probabilities in 0-1 with equivalent weight
+tr_ordinal = tr_ordinal[,odd1_prob:=ifelse(odd1_prob<0.2,"v.low",
+                                           ifelse(odd1_prob<0.4,"low",
+                                            ifelse(odd1_prob<0.6,"medium",
+                                             ifelse(odd1_prob<0.8,"high","v.high"))))]
+tr_ordinal = tr_ordinal[,odd2_prob:=ifelse(odd2_prob<0.2,"v.low",
+                                           ifelse(odd2_prob<0.4,"low",
+                                                  ifelse(odd2_prob<0.6,"medium",
+                                                         ifelse(odd2_prob<0.8,"high","v.high"))))]
+tr_ordinal = tr_ordinal[,oddX_prob:=ifelse(oddX_prob<0.2,"v.low",
+                                           ifelse(oddX_prob<0.4,"low",
+                                                  ifelse(oddX_prob<0.6,"medium",
+                                                         ifelse(oddX_prob<0.8,"high","v.high"))))]
+
+#the same procedure applies to test data
+test_ordinal = test_ordinal[,odd1_prob:=ifelse(odd1_prob<0.2,"v.low",
+                                           ifelse(odd1_prob<0.4,"low",
+                                                  ifelse(odd1_prob<0.6,"medium",
+                                                         ifelse(odd1_prob<0.8,"high","v.high"))))]
+test_ordinal = test_ordinal[,odd2_prob:=ifelse(odd2_prob<0.2,"v.low",
+                                           ifelse(odd2_prob<0.4,"low",
+                                                  ifelse(odd2_prob<0.6,"medium",
+                                                         ifelse(odd2_prob<0.8,"high","v.high"))))]
+test_ordinal = test_ordinal[,oddX_prob:=ifelse(oddX_prob<0.2,"v.low",
+                                           ifelse(oddX_prob<0.4,"low",
+                                                  ifelse(oddX_prob<0.6,"medium",
+                                                         ifelse(oddX_prob<0.8,"high","v.high"))))]
+
+#ordinal logistic regression model
+polrMod <- polr(result ~ odd1_prob + odd2_prob + oddX_prob, data=tr_ordinal)
+summary(polrMod)
+
+#prediction by OLR
+pred_OLR=predict(polrMod,test_ordinal)
+table(test_ordinal$result,pred_OLR)
+pred_OLR_probs=predict(polrMod,test_ordinal,type="prob")
+
+#rps for OLR
+rps_OLR=RPS_matrix(pred_OLR_probs,outcomes)
+#### Ordinal Logistic Regression RPS ####
+100*mean(rps_OLR)
+####
